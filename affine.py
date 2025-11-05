@@ -1,369 +1,259 @@
-import tkinter, tkinter.messagebox
+import tkinter
+from typing import Any
 import numpy as np
 from tkinter import simpledialog
-from geometry import BaseCanvas, Edge, ITransformable, Point, PointType, Polygon, PolygonType
-from typing import Any, Callable, Iterator, Sequence
+from geometry import Point, BaseCanvas, Number, PointType, LineType, Shape
 
-FOV = 120  # Field of view in degrees
+WIDTH = 300
+HEIGHT = 300
 
-class TkinterCanvas(BaseCanvas):
+
+class InteractiveCanvas(BaseCanvas):
     def __init__(self, width: int, height: int) -> None:
         super().__init__(width, height)
-        self.tk_canvas = tkinter.Canvas(width=width, height=height)
-        self.tk_canvas.pack()
-        root = self.tk_canvas.winfo_toplevel()
-        self.create_menubar(root)
-        self.last_action: dict[str, Any] = {}
+        self.old_point: Point | None = None
 
-    def create_menubar(self, root: tkinter.Tk | tkinter.Toplevel) -> None:
-        menubar = tkinter.Menu(root)
-        file_menu = tkinter.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Exit", command=root.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
-        transformations_menu = tkinter.Menu(menubar, tearoff=1)
-        transformations_menu.add_command(label="Scale", command=self.apply_scale)
-        transformations_menu.add_command(label="Translate", command=self.apply_translation)
-        transformations_menu.add_command(label="Rotate Around Point", command=self.apply_rotation_around_point)
-        transformations_menu.add_command(label="Rotate Around Center", command=self.apply_rotation_around_center)
-        transformations_menu.add_command(label="Reflect", command=self.apply_reflection)
-        transformations_menu.add_separator()
-        transformations_menu.add_command(label="Repeat Last Action", command=self.repeat_last_action)
-        menubar.add_cascade(label="Transformations", menu=transformations_menu)
-        root.config(menu=menubar)
-    
-    @staticmethod
-    def projection_onto_2d(points: Sequence[PointType], width: int, height: int) -> Iterator[Point]:
-        aspect = width / height
-        fov = np.radians(FOV)
-
-        matrix = np.array([
-            [1 / (aspect * np.tan(fov / 2)), 0, 0, 0],
-            [0, 1 / np.tan(fov / 2), 0, 0],
-            [0, 0, 1, -1],
-            [0, 0, 1, 0]
-        ], dtype=float)
-
-        for point in points:
-            vec = np.array([point.x, point.y, point.z, 1])
-            transformed_vec = vec @ matrix
-            if transformed_vec[3] != 0:
-                x_ndc = transformed_vec[0] / transformed_vec[3]
-                y_ndc = transformed_vec[1] / transformed_vec[3]
-            else:
-                x_ndc = transformed_vec[0]
-                y_ndc = transformed_vec[1]
-
-            x_screen = (1 - x_ndc) * 0.5 * width
-            y_screen = (y_ndc + 1) * 0.5 * height
-
-            print(f"3D Point ({point.x}, {point.y}, {point.z}) -> 2D Point ({x_screen}, {y_screen})")
-
-            yield Point(x_screen, y_screen, 0)
-    
-    def draw_shapes(self) -> None:
-        self.tk_canvas.delete("all")
-        print("--- Projection Debug ---")
-
-        for point in self.projection_onto_2d(self.points, self.width, self.height):
-            self.tk_canvas.create_oval(
-                point.x - 2, point.y - 2,
-                point.x + 2, point.y + 2,
-                fill='black'
-            )
-
-        for edge in self.edges:
-            for p1, p2 in zip(
-                self.projection_onto_2d(edge.points, self.width, self.height),
-                self.projection_onto_2d(edge.points[1:], self.width, self.height)
-            ):
-                self.tk_canvas.create_line(p1.x, p1.y, p2.x, p2.y, fill='black')
-
-        # for polygon in self.polygons:
-        #     points = [(point.x, point.y) for edge in polygon for point in self.projection_onto_2d(edge.points)]
-        #     self.tk_canvas.create_polygon(points, outline='black', fill='', width=1)
+    def __add__(self, shape: Shape) -> "InteractiveCanvas":
+        super().__add__(shape)
+        return self
 
     def clear(self) -> None:
-        super().clear()
-        self.tk_canvas.delete("all")
+        self.old_point = None
+        return super().clear()
 
-    def get_polygon(self) -> PolygonType | None:
-        num = simpledialog.askinteger(
-            "Input for polygon", "Enter number of polygon"
+def clear_canvas(
+    tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas
+) -> None:
+    canvas.clear()
+    tk_canvas.delete("all")
+
+def click_event(
+    event: tkinter.Event, tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas
+) -> None:
+
+    if event.x < 0 or event.x > canvas.width or event.y < 0 or event.y > canvas.height:
+        return
+
+    if event.num == 1:  # Left mouse button
+        x, y = event.x, event.y
+        point = Point(x, y)
+        canvas += point
+        draw_canvas(tk_canvas, canvas)
+
+        if canvas.old_point:
+            draw_line(
+                tk_canvas,
+                canvas,
+                canvas.old_point.x,
+                canvas.old_point.y,
+                point.x,
+                point.y,
+            )
+        canvas.old_point = point
+
+    elif event.num == 3:  # Right mouse button
+        canvas.old_point = None
+
+    print(f"Canvas state: {canvas}")
+
+
+def draw_line(
+    tk_canvas: tkinter.Canvas,
+    canvas: InteractiveCanvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> None:
+    if not (
+        0 <= x1 <= canvas.width
+        and 0 <= y1 <= canvas.height
+        and 0 <= x2 <= canvas.width
+        and 0 <= y2 <= canvas.height
+    ):
+        raise ValueError("Coordinates must be within the canvas dimensions.")
+
+    dx = x2 - x1
+    dy = y2 - y1
+
+    steps = int(max(abs(dx), abs(dy)))
+    if steps == 0:
+        return
+
+    x_inc = dx / steps
+    y_inc = dy / steps
+
+    for i in range(steps + 1):
+        x = int(x1 + i * x_inc)
+        y = int(y1 + i * y_inc)
+        canvas += Point(x, y)
+
+    draw_canvas(tk_canvas, canvas)
+
+
+def draw_canvas(tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas) -> None:
+    tk_canvas.delete("all")
+    for x, y in canvas.points:
+        tk_canvas.create_line(x, y, x + 1, y + 1, fill="black")
+
+
+def with_point_selection(func: Any) -> Any:
+    def wrapper(tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas, *args: Any, **kwargs: Any) -> None:
+        coords = {}
+
+        def on_click(event: tkinter.Event) -> None:
+            coords["x"] = event.x
+            coords["y"] = event.y
+            tk_canvas.delete("msg")
+            tk_canvas.unbind("<Button-1>", bind_id)
+            tk_canvas.bind(
+                "<Button-1>", lambda event: click_event(event, tk_canvas, canvas)
+            )
+            center = Point(coords["x"], coords["y"])
+            func(tk_canvas, canvas, center, *args, **kwargs)
+
+        tk_canvas.addtag_withtag(
+            "msg",
+            tk_canvas.create_text(
+                canvas.width // 2,
+                20,
+                text="Кликните для выбора точки",
+                fill="red",
+                font=("Arial", 16),
+            ),
         )
+        bind_id = tk_canvas.bind("<Button-1>", on_click)
 
-        if num is None or not self.polygons or len(self.polygons) < num or num < 1:
-            tkinter.messagebox.showerror(
-                "Invalid polygon",
-                "Invalid polygon number."
-            )
-            return None
-        
-        return self.polygons[num - 1]
-    
-    def highlight_polygon(self, polygon: PolygonType) -> None:
-        for edge in polygon:
-            for p1, p2 in zip(
-                self.projection_onto_2d(edge.points, self.width, self.height),
-                self.projection_onto_2d(edge.points[1:], self.width, self.height)
-            ):
-                self.tk_canvas.create_line(p1.x, p1.y, p2.x, p2.y, fill='red', width=1, dash=(4, 2))
+    return wrapper
 
-    @staticmethod
-    def with_point_selection(func: Callable[..., Any]) -> Callable[..., Any]:
-        def ask() -> Iterator[float | None]:
-            for axis in ['x', 'y', 'z']:
-                yield simpledialog.askfloat(
-                    f"Input for {axis}-coordinate", 
-                    f"Enter {axis}-coordinate of the point:"
-                )
-                
-        def wrapper(obj: ITransformable, *args: Any, **kwargs: Any) -> Any:
-            x, y, z = ask()
-            if x is None or y is None or z is None:
-                return
-            
-            point = Point(x, y, z)
-            return obj.point_selected(func, point, *[obj, *args], **kwargs)
-        
-        return wrapper
-    
-    def apply_scale(self, **kwargs: Any) -> None:
-        def ask() -> Iterator[float | None]:
-            for axis in ['sx', 'sy', 'sz']:
-                yield simpledialog.askfloat(
-                    f"Input for {axis}", 
-                    f"Enter scaling factor for {axis}-axis:"
-                )
 
-        try:
-            obj = kwargs.get("object") or self.get_polygon()
-            if obj is None or not isinstance(obj, Polygon):
-                tkinter.messagebox.showerror(
-                    "Invalid polygon",
-                    "Selected polygon is not transformable."
-                )
-                return
-            self.highlight_polygon(obj)
-            
-            sx, sy, sz = kwargs.get("factors") or ask()
-            if sx is None or sy is None or sz is None:
-                tkinter.messagebox.showerror(
-                    "Invalid scaling factors",
-                    "Invalid scaling factors. Please enter valid numbers for all axes."
-                )
-                return
+def apply_transformation(tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas) -> None:
+    dx = simpledialog.askfloat(
+        "Transformation", "Введите dx (смещение по X):", parent=tk_canvas
+    )
+    dy = simpledialog.askfloat(
+        "Transformation", "Введите dy (смещение по Y):", parent=tk_canvas
+    )
+    if dx is None or dy is None:
+        return
 
-            obj.scale_from_center(sx, sy, sz)
-            self.last_action = {
-                "action": self.scale_from_center,
-                "kwargs": {"object": obj, "factors": (sx, sy, sz)}
-            }
-        finally:
-            self.draw_shapes()
+    matrix = np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1]])
 
-    def apply_translation(self, **kwargs: Any) -> None:
-        def ask() -> Iterator[float | None]:
-            for axis in ['tx', 'ty', 'tz']:
-                yield simpledialog.askfloat(
-                    f"Input for {axis}", 
-                    f"Enter translation distance for {axis}-axis:"
-                )
-        
-        try:
-            obj = kwargs.get("object") or self.get_polygon()
-            if obj is None or not isinstance(obj, Polygon):
-                tkinter.messagebox.showerror(
-                    "Invalid polygon",
-                    "Selected polygon is not transformable."
-                )
-                return
-            self.highlight_polygon(obj)
-            
-            tx, ty, tz = ask()
-            if tx is None or ty is None or tz is None:
-                tkinter.messagebox.showerror(
-                    "Invalid translation",
-                    "Invalid translation distances. Please enter valid numbers for all axes."
-                )
-                return
-            
-            obj.translate(tx, ty, tz)
-            self.last_action = {
-                "action": self.apply_translation,
-                "kwargs": {"object": obj, "distances": (tx, ty, tz)}
-            }
-        finally:
-            self.draw_shapes()
+    canvas.transform(matrix)
+    draw_canvas(tk_canvas, canvas)
 
-    def apply_rotation_around_center(self, **kwargs: Any) -> None:
-        def ask() -> Iterator[float | None]:
-            for axis in ['angle_x', 'angle_y', 'angle_z']:
-                yield simpledialog.askfloat(
-                    f"Input for {axis}", 
-                    f"Enter rotation angle (in degrees) around {axis}-axis:"
-                )
 
-        try:
-            obj = kwargs.get("object") or self.get_polygon()
-            if obj is None or not isinstance(obj, Polygon):
-                tkinter.messagebox.showerror(
-                    "Invalid polygon",
-                    "Selected polygon is not transformable."
-                )
-                return
-            self.highlight_polygon(obj)
-                    
-            angle_x, angle_y, angle_z = kwargs.get("angles") or ask()
-            if angle_x is None or angle_y is None or angle_z is None:
-                tkinter.messagebox.showerror(
-                    "Invalid angles",
-                    "Invalid rotation angles. Please enter valid numbers for all axes."
-                )
-                return
-            
-            obj.rotate(angle_x, angle_y, angle_z)
-            self.last_action = {
-                "action": self.apply_rotation_around_center,
-                "kwargs": {"object": obj, "angles": (angle_x, angle_y, angle_z)}
-            }
-        finally:
-            self.draw_shapes()
+def apply_rotation(
+    tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas, center: Point
+) -> None:
+    angle = simpledialog.askfloat(
+        "Transformation", "Введите угол поворота (в градусах):", parent=tk_canvas
+    )
+    if angle is None:
+        return
 
-    @with_point_selection
-    def apply_rotation_around_point(self, **kwargs: Any) -> None:
-        def ask() -> Iterator[float | None]:
-            for axis in ['angle_x', 'angle_y', 'angle_z']:
-                yield simpledialog.askfloat(
-                    f"Input for {axis}", 
-                    f"Enter rotation angle (in degrees) around {axis}-axis:"
-                )
+    radians = np.radians(angle)
+    cos_a = np.cos(radians)
+    sin_a = np.sin(radians)
 
-        try:
-            obj = kwargs.get("object") or self.get_polygon()
-            if obj is None or not isinstance(obj, Polygon):
-                tkinter.messagebox.showerror(
-                    "Invalid polygon",
-                    "Selected polygon is not transformable."
-                )
-                return
-            self.highlight_polygon(obj)
-                    
-            angle_x, angle_y, angle_z = kwargs.get("angles") or ask()
-            if angle_x is None or angle_y is None or angle_z is None:
-                tkinter.messagebox.showerror(
-                    "Invalid angles",
-                    "Invalid rotation angles. Please enter valid numbers for all axes."
-                )
-                return
-            
-            obj.rotate(angle_x, angle_y, angle_z)
-            self.last_action = {
-                "action": self.apply_rotation_around_point,
-                "kwargs": {"object": obj, "angles": (angle_x, angle_y, angle_z)}
-            }
-        finally:
-            self.draw_shapes()
+    translation_to_origin = np.array([[1, 0, -center.x], [0, 1, -center.y], [0, 0, 1]])
+    rotation_matrix = np.array([[cos_a, -sin_a, 0], [sin_a, cos_a, 0], [0, 0, 1]])
+    translation_back = np.array([[1, 0, center.x], [0, 1, center.y], [0, 0, 1]])
 
-    def apply_reflection(self, **kwargs: Any) -> None:
-        try:
-            obj = kwargs.get("object") or self.get_polygon()
-            if obj is None or not isinstance(obj, Polygon):
-                tkinter.messagebox.showerror(
-                    "Invalid polygon",
-                    "Selected polygon is not transformable."
-                )
-                return
-            self.highlight_polygon(obj)
+    matrix = translation_back @ rotation_matrix @ translation_to_origin
 
-            axis = kwargs.get("axis") or simpledialog.askstring(
-                "Input for reflection", 
-                "Enter axis of reflection (x, y, or z):"
-            )
-            if axis not in ('x', 'y', 'z'):
-                tkinter.messagebox.showerror(
-                    "Invalid axis",
-                    "Invalid axis of reflection. Please enter 'x', 'y' or 'z'."
-                )
-                return
-            
-            obj.reflect(axis)
-            self.last_action = {
-                "action": self.apply_reflection,
-                "kwargs": {"object": obj, "axis": axis}
-            }
-        finally:
-            self.draw_shapes()
+    canvas.transform(matrix)
+    draw_canvas(tk_canvas, canvas)
 
-    def repeat_last_action(self) -> None:
-        if not self.last_action:
-            tkinter.messagebox.showinfo(
-                "No action to repeat",
-                "There is no last action to repeat."
-            )
-            return
-        
-        action = self.last_action.get("action")
-        kwargs = self.last_action.get("kwargs", {})
-        if action:
-            action(**kwargs)
+
+@with_point_selection
+def apply_rotation_around_point(
+    tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas, center: Point
+) -> None:
+    apply_rotation(tk_canvas, canvas, center)
+
+
+def apply_scaling(
+    tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas, center: Point
+) -> None:
+    sx = simpledialog.askfloat(
+        "Transformation",
+        "Введите коэффициент масштабирования по X (sx):",
+        parent=tk_canvas,
+    )
+    sy = simpledialog.askfloat(
+        "Transformation",
+        "Введите коэффициент масштабирования по Y (sy):",
+        parent=tk_canvas,
+    )
+    if sx is None or sy is None:
+        return
+
+    translation_to_origin = np.array([[1, 0, -center.x], [0, 1, -center.y], [0, 0, 1]])
+    scaling_matrix = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]])
+    translation_back = np.array([[1, 0, center.x], [0, 1, center.y], [0, 0, 1]])
+
+    matrix = translation_back @ scaling_matrix @ translation_to_origin
+
+    canvas.transform(matrix)
+    draw_canvas(tk_canvas, canvas)
+
+
+@with_point_selection
+def apply_scaling_around_point(
+    tk_canvas: tkinter.Canvas, canvas: InteractiveCanvas, center: Point
+) -> None:
+    apply_scaling(tk_canvas, canvas, center)
+
 
 if __name__ == "__main__":
-    canvas = TkinterCanvas(400, 400)
+    root = tkinter.Tk()
+    root.title("Холст")
+    root.geometry(f"{WIDTH}x{HEIGHT}")
 
-    canvas += Polygon([
-        Edge([
-            Point(-30, -30, 50),
-            Point(30, -30, 50),
-            Point(30, 30, 50),
-            Point(-30, 30, 50),
-            Point(-30, -30, 50)
-        ]),
-        Edge([
-            Point(-30, -30, 250),
-            Point(30, -30, 250),
-            Point(30, 30, 250),
-            Point(-30, 30, 250),
-            Point(-30, -30, 250)
-        ]),
-        Edge([
-            Point(-30, -30, 50),
-            Point(-30, -30, 250)
-        ]),
-        Edge([
-            Point(30, -30, 50),
-            Point(30, -30, 250)
-        ]),
-        Edge([
-            Point(30, 30, 50),
-            Point(30, 30, 250)
-        ]),
-        Edge([
-            Point(-30, 30, 50),
-            Point(-30, 30, 250)
-        ])
-    ])
+    canvas = InteractiveCanvas(WIDTH, HEIGHT)
+    tk_canvas = tkinter.Canvas(root, width=WIDTH, height=HEIGHT, bg="white")
+    tk_canvas.pack()
 
-    # canvas += Polygon([
-    # Edge([
-    #     Point(1, 0, 1),
-    #     Point(2, 40, 50),
-    #     Point(50, 50, 50),
-    #     Point(40, 40, 50)
-    # ]),
-    # Edge([
-    #     Point(40, 40, 50),
-    #     Point(42, 40, 50),
-    # ]),
-    # Edge([
-    #     Point(50, 40, 50),
-    #     Point(42, 40, 50),
-    # ]),
-    # Edge([
-    #     Point(50, 50, 50),
-    #     Point(42, 40, 50),
-    # ]),
-    # ])
-    # print(canvas)
+    tk_canvas.bind("<Button-1>", lambda event: click_event(event, tk_canvas, canvas))
+    tk_canvas.bind("<Button-3>", lambda event: click_event(event, tk_canvas, canvas))
 
-    canvas.draw_shapes()
-    tkinter.mainloop()
+    menubar = tkinter.Menu(root)
+    file_menu = tkinter.Menu(menubar, tearoff=0)
+    edit_menu = tkinter.Menu(menubar, tearoff=0)
+
+    file_menu.add_command(label="Выйти", command=root.quit)
+    menubar.add_cascade(label="Файл", menu=file_menu)
+
+    edit_menu.add_command(
+        label="Применить сдвиг", command=lambda: apply_transformation(tk_canvas, canvas)
+    )
+    edit_menu.add_command(
+        label="Применить поворот",
+        command=lambda: apply_rotation(
+            tk_canvas, canvas, Point(WIDTH // 2, HEIGHT // 2)
+        ),
+    )
+    edit_menu.add_command(
+        label="Повернуть вокруг точки",
+        command=lambda: apply_rotation_around_point(tk_canvas, canvas),
+    )
+    edit_menu.add_command(
+        label="Применить масштабирование",
+        command=lambda: apply_scaling(
+            tk_canvas, canvas, Point(WIDTH // 2, HEIGHT // 2)
+        ),
+    )
+    edit_menu.add_command(
+        label="Масштабировать вокруг точки",
+        command=lambda: apply_scaling_around_point(tk_canvas, canvas),
+    )
+    edit_menu.add_separator()
+    edit_menu.add_command(
+        label="Очистить холст", command=lambda: clear_canvas(tk_canvas, canvas)
+    )
+    menubar.add_cascade(label="Правка", menu=edit_menu)
+
+    root.config(menu=menubar)
+
+    root.mainloop()
